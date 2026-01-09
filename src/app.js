@@ -1,18 +1,29 @@
 const express = require("express");
+const session = require("express-session");
 const cors = require("cors");
+require("dotenv").config();
 
 const app = express();
 
-// Middlewares
-app.use(cors());
+app.use(
+  cors({
+    origin: true,
+    credentials: true,
+  })
+);
+
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
-// Routes
-app.use("/api", require("./routes"));
+app.use(
+  session({
+    secret: process.env.SESSION_SECRET,
+    resave: false,
+    saveUninitialized: false,
+  })
+);
 
-// Default route
-app.get("/", (req, res) => {
-  res.json({ status: "API running 🚀" });
-});
+app.use(express.static("public"));
+app.use("/api/auth", require("./routes/auth.routes"));
 
 module.exports = app;
