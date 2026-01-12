@@ -1,28 +1,23 @@
-const db = require("../config/db");
+const db = require("../../config/db");
+
 
 exports.list = async (req, res) => {
   try {
-    const [rows] = await db.execute("SELECT * FROM contacts");
+    const [rows] = await db.execute("SELECT * FROM contacts order by id desc");
 
     res.json({
       success: true,
       data: rows,
     });
-
   } catch (err) {
     console.error("DATA LIST ERROR:", err);
     res.status(500).json({ message: "Server error" });
   }
 };
 
-
 exports.create = async (req, res) => {
   try {
-    const {
-      phone_number,
-      full_name,
-      source = "manual",
-    } = req.body;
+    const { phone_number, full_name, source = "manual" } = req.body;
 
     // 🔐 basic validation
     if (!phone_number) {
@@ -64,13 +59,7 @@ exports.create = async (req, res) => {
       )
       VALUES (?, ?, ?, 0, NOW(), ?, NOW(), ?)
       `,
-      [
-        phone_number,
-        full_name || null,
-        source,
-        userId,
-        userId,
-      ]
+      [phone_number, full_name || null, source, userId, userId]
     );
 
     return res.status(201).json({
