@@ -27,5 +27,5 @@ app.use(express.static("public"));
 app.use("/api/auth", require("./routes/auth.routes"));
 app.use("/api/contacts", require("./routes/contact.routes"));
 app.use("/api/phonebook", require("./routes/phonebook.routes"));
-
+app.use("/api/template", require("./routes/templates.routes"));
 module.exports = app;
