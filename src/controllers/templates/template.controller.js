@@ -2,6 +2,7 @@ const db = require("../../config/db");
 const axios = require("axios");
 
 exports.create = async (req, res) => {
+  const conn = await db.getConnection();
   try {
     const {
       category,
@@ -13,13 +14,78 @@ exports.create = async (req, res) => {
       footer_text,
       buttons,
     } = req.body;
-
     // ✅ Parse buttons JSON
     const parsedButtons = buttons ? JSON.parse(buttons) : [];
-
-    // ✅ Build Meta components
+    await conn.beginTransaction();
+    // ===============================
+    // 1️⃣ INSERT TEMPLATE (DRAFT)
+    // ===============================
+    const [templateResult] = await conn.execute(
+      `
+      INSERT INTO templates
+      (
+        name,
+        language,
+        category,
+        previous_category,
+        status,
+        header_type,
+        header_text,
+        body_text,
+        footer_text,
+        created_by
+      )
+      VALUES (?, ?, ?, ?, 'DRAFT', ?, ?, ?, ?, ?)
+      `,
+      [
+        template_name,
+        language,
+        category,
+        category,
+        header_type,
+        header_text || null,
+        body_text,
+        footer_text || null,
+        req.user?.id || 1,
+      ]
+    );
+    const templateId = templateResult.insertId;
+    // ===============================
+    // 2️⃣ INSERT BUTTONS
+    // ===============================
+    for (let i = 0; i < parsedButtons.length; i++) {
+      const btn = parsedButtons[i];
+      await conn.execute(
+        `
+        INSERT INTO template_buttons
+        (
+          template_id,
+          type,
+          text,
+          phone_number,
+          url,
+          ui_type,
+          copy_value,
+          position
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `,
+        [
+          templateId,
+          btn.type,
+          btn.text,
+          btn.phone_number || null,
+          btn.url || null,
+          btn._uiType || null,
+          btn.copy_value || null,
+          i,
+        ]
+      );
+    }
+    // ===============================
+    // 3️⃣ BUILD META COMPONENTS
+    // ===============================
     const components = [];
-
     // HEADER
     if (header_type === "text" && header_text) {
       components.push({
@@ -28,20 +94,17 @@ exports.create = async (req, res) => {
         text: header_text,
       });
     }
-
     if (["image", "video", "document"].includes(header_type)) {
       components.push({
         type: "HEADER",
         format: header_type.toUpperCase(),
       });
     }
-
     // BODY (required)
     components.push({
       type: "BODY",
       text: body_text,
     });
-
     // FOOTER
     if (footer_text) {
       components.push({
@@ -49,7 +112,6 @@ exports.create = async (req, res) => {
         text: footer_text,
       });
     }
-
     // BUTTONS
     if (parsedButtons.length > 0) {
       components.push({
@@ -57,16 +119,19 @@ exports.create = async (req, res) => {
         buttons: parsedButtons,
       });
     }
-
-    // ✅ FINAL META PAYLOAD
+    // ===============================
+    // 4️⃣ META PAYLOAD
+    // ===============================
     const metaPayload = {
       name: template_name,
       language,
       category,
+      parameter_format: "POSITIONAL",
       components,
     };
-
-   
+    // ===============================
+    // 5️⃣ CALL META GRAPH API
+    // ===============================
     const response = await axios.post(
       `https://graph.facebook.com/${process.env.VERSION}/${process.env.WABA_ID}/message_templates`,
       metaPayload,
@@ -77,17 +142,227 @@ exports.create = async (req, res) => {
         },
       }
     );
-
+    const metaData = response.data;
+    // ===============================
+    // 6️⃣ UPDATE TEMPLATE WITH META DATA
+    // ===============================
+    await conn.execute(
+      `
+      UPDATE templates
+      SET
+        meta_template_id = ?,
+        status = ?
+      WHERE id = ?
+      `,
+      [metaData.id, metaData.status || "PENDING", templateId]
+    );
+    // ===============================
+    // 7️⃣ SAVE META LOG
+    // ===============================
+    await conn.execute(
+      `
+      INSERT INTO template_meta_logs
+      (
+        template_id,
+        meta_status,
+        meta_response
+      )
+      VALUES (?, ?, ?)
+      `,
+      [templateId, metaData.status || "PENDING", JSON.stringify(metaData)]
+    );
+    await conn.commit();
     return res.json({
       success: true,
-      data: response.data,
+      template_id: templateId,
+      meta: metaData,
     });
   } catch (error) {
+    await conn.rollback();
     console.error("Meta API error:", error.response?.data || error.message);
-
     return res.status(500).json({
       success: false,
       error: error.response?.data || error.message,
     });
+  } finally {
+    conn.release();
+  }
+};
+
+exports.syncFromMeta = async (req, res) => {
+  const conn = await db.getConnection();
+
+  try {
+    await conn.beginTransaction();
+
+    // 1️⃣ Fetch templates from Meta
+    const metaRes = await axios.get(
+      `https://graph.facebook.com/${process.env.VERSION}/${process.env.WABA_ID}/message_templates`,
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.META_ACCESS_TOKEN}`,
+        },
+      }
+    );
+
+    const metaTemplates = metaRes.data.data || [];
+
+    for (const tpl of metaTemplates) {
+      const {
+        id: metaId,
+        name,
+        language,
+        category,
+        previous_category,
+        status,
+        components,
+        parameter_format,
+      } = tpl;
+
+      // 2️⃣ Check if template exists
+      const [existing] = await conn.execute(
+        `SELECT id FROM templates WHERE meta_template_id = ?`,
+        [metaId]
+      );
+
+      let templateId;
+
+      if (existing.length === 0) {
+        // ===============================
+        // 3️⃣ INSERT TEMPLATE
+        // ===============================
+        const header = components.find((c) => c.type === "HEADER");
+        const body = components.find((c) => c.type === "BODY");
+        const footer = components.find((c) => c.type === "FOOTER");
+
+        const [insertRes] = await conn.execute(
+          `
+          INSERT INTO templates
+          (
+            meta_template_id,
+            name,
+            language,
+            category,
+            previous_category,
+            status,
+            header_type,
+            header_text,
+            body_text,
+            footer_text,
+            parameter_format,
+            created_by
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `,
+          [
+            metaId,
+            name,
+            language,
+            category,
+            previous_category || null,
+            status,
+            header?.format ? header.format.toLowerCase() : "none",
+            header?.text || null,
+            body?.text || "",
+            footer?.text || null,
+            parameter_format || "POSITIONAL",
+            req.user?.id || 1,
+          ]
+        );
+
+        templateId = insertRes.insertId;
+      } else {
+        // ===============================
+        // 4️⃣ UPDATE TEMPLATE
+        // ===============================
+        templateId = existing[0].id;
+
+        await conn.execute(
+          `
+          UPDATE templates
+          SET
+            status = ?,
+            category = ?,
+            previous_category = ?,
+            updated_at = CURRENT_TIMESTAMP
+          WHERE id = ?
+          `,
+          [status, category, previous_category || null, templateId]
+        );
+
+        // Remove old buttons before re-inserting
+        await conn.execute(
+          `DELETE FROM template_buttons WHERE template_id = ?`,
+          [templateId]
+        );
+      }
+
+      // ===============================
+      // 5️⃣ INSERT BUTTONS
+      // ===============================
+      const btnComponent = components.find((c) => c.type === "BUTTONS");
+
+      if (btnComponent?.buttons?.length) {
+        for (let i = 0; i < btnComponent.buttons.length; i++) {
+          const btn = btnComponent.buttons[i];
+
+          await conn.execute(
+            `
+            INSERT INTO template_buttons
+            (
+              template_id,
+              type,
+              text,
+              phone_number,
+              url,
+              position
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            `,
+            [
+              templateId,
+              btn.type,
+              btn.text,
+              btn.phone_number || null,
+              btn.url || null,
+              i,
+            ]
+          );
+        }
+      }
+
+      // ===============================
+      // 6️⃣ SAVE META LOG
+      // ===============================
+      await conn.execute(
+        `
+        INSERT INTO template_meta_logs
+        (
+          template_id,
+          meta_status,
+          meta_response
+        )
+        VALUES (?, ?, ?)
+        `,
+        [templateId, status, JSON.stringify(tpl)]
+      );
+    }
+
+    await conn.commit();
+
+    res.json({
+      success: true,
+      synced: metaTemplates.length,
+    });
+  } catch (err) {
+    await conn.rollback();
+    console.error("Sync error:", err.response?.data || err.message);
+
+    res.status(500).json({
+      success: false,
+      error: err.response?.data || err.message,
+    });
+  } finally {
+    conn.release();
   }
 };

@@ -10,4 +10,6 @@ router.post(
   controller.create
 );
 
+router.post("/sync-from-meta", controller.syncFromMeta);
+
 module.exports = router;
