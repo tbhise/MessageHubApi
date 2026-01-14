@@ -10,6 +10,9 @@ router.post(
   controller.create
 );
 
+router.post("/list", authMiddleware, controller.list);
+router.post("/getTemplateById/:id", authMiddleware, controller.getTemplateById);
+
 router.post("/sync-from-meta", controller.syncFromMeta);
 
 module.exports = router;

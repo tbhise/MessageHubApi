@@ -366,3 +366,85 @@ exports.syncFromMeta = async (req, res) => {
     conn.release();
   }
 };
+
+exports.list = async (req, res) => {
+  try {
+    const [rows] = await db.execute(`
+      SELECT
+        t.id,
+        t.meta_template_id,
+        t.name,
+        t.language,
+        t.category,
+        t.previous_category,
+        t.status,
+        t.created_at,
+        COUNT(b.id) AS button_count
+      FROM templates t
+      LEFT JOIN template_buttons b
+        ON b.template_id = t.id
+      GROUP BY t.id
+      ORDER BY t.created_at DESC
+    `);
+
+    return res.json({
+      success: true,
+      data: rows,
+    });
+  } catch (error) {
+    console.error("Fetch templates error:", error);
+
+    return res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+};
+
+exports.getTemplateById = async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const [[template]] = await db.execute(
+      `SELECT * FROM templates WHERE id = ?`,
+      [id]
+    );
+
+    if (!template) {
+      return res.status(404).json({
+        success: false,
+        message: "Template not found",
+      });
+    }
+
+    const [buttons] = await db.execute(
+      `
+      SELECT
+        type,
+        text,
+        phone_number,
+        url,
+        ui_type,
+        copy_value,
+        position
+      FROM template_buttons
+      WHERE template_id = ?
+      ORDER BY position ASC
+      `,
+      [id]
+    );
+
+    return res.json({
+      success: true,
+      template,
+      buttons,
+    });
+  } catch (error) {
+    console.error("Fetch template error:", error);
+
+    return res.status(500).json({
+      success: false,
+      error: error.message,
+    });
+  }
+};
