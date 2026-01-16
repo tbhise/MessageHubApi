@@ -23,7 +23,7 @@ exports.createPhonebookAndImportContacts = async (req, res) => {
   const connection = await db.getConnection();
 
   try {
-    const { phonebook_name, description } = req.body;
+    const { phonebook_name, description, countryCode } = req.body;
 
     if (!phonebook_name) {
       return res.status(400).json({
@@ -110,9 +110,11 @@ exports.createPhonebookAndImportContacts = async (req, res) => {
       if (seen.has(key)) continue;
       seen.add(key);
 
+      const whatsappNumber = `${countryCode}${phone}`.replace("+", "");
+
       values.push([
         phonebookId,
-        phone,
+        whatsappNumber,
         fullName,
         "phonebook",
         0,
