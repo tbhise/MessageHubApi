@@ -7,12 +7,14 @@ router.post(
   "/create",
   uploadTemplateHeader.single("file"),
   authMiddleware,
-  controller.create
+  controller.create,
 );
 
 router.post("/list", authMiddleware, controller.list);
 router.post("/getTemplateById/:id", authMiddleware, controller.getTemplateById);
 
 router.post("/sync-from-meta", controller.syncFromMeta);
+
+router.post("/syncno", authMiddleware, controller.syncno);
 
 module.exports = router;

@@ -47,7 +47,7 @@ exports.create = async (req, res) => {
         body_text,
         footer_text || null,
         req.user?.id || 1,
-      ]
+      ],
     );
     const templateId = templateResult.insertId;
     // ===============================
@@ -79,7 +79,7 @@ exports.create = async (req, res) => {
           btn._uiType || null,
           btn.copy_value || null,
           i,
-        ]
+        ],
       );
     }
     // ===============================
@@ -140,7 +140,7 @@ exports.create = async (req, res) => {
           Authorization: `Bearer ${process.env.META_ACCESS_TOKEN}`,
           "Content-Type": "application/json",
         },
-      }
+      },
     );
     const metaData = response.data;
     // ===============================
@@ -154,7 +154,7 @@ exports.create = async (req, res) => {
         status = ?
       WHERE id = ?
       `,
-      [metaData.id, metaData.status || "PENDING", templateId]
+      [metaData.id, metaData.status || "PENDING", templateId],
     );
     // ===============================
     // 7️⃣ SAVE META LOG
@@ -169,7 +169,7 @@ exports.create = async (req, res) => {
       )
       VALUES (?, ?, ?)
       `,
-      [templateId, metaData.status || "PENDING", JSON.stringify(metaData)]
+      [templateId, metaData.status || "PENDING", JSON.stringify(metaData)],
     );
     await conn.commit();
     return res.json({
@@ -180,9 +180,10 @@ exports.create = async (req, res) => {
   } catch (error) {
     await conn.rollback();
     console.error("Meta API error:", error.response?.data || error.message);
+
     return res.status(500).json({
       success: false,
-      error: error.response?.data || error.message,
+      error: error.response?.data.error.error_user_msg || error.message,
     });
   } finally {
     conn.release();
@@ -202,7 +203,7 @@ exports.syncFromMeta = async (req, res) => {
         headers: {
           Authorization: `Bearer ${process.env.META_ACCESS_TOKEN}`,
         },
-      }
+      },
     );
 
     const metaTemplates = metaRes.data.data || [];
@@ -222,7 +223,7 @@ exports.syncFromMeta = async (req, res) => {
       // 2️⃣ Check if template exists
       const [existing] = await conn.execute(
         `SELECT id FROM templates WHERE meta_template_id = ?`,
-        [metaId]
+        [metaId],
       );
 
       let templateId;
@@ -267,7 +268,7 @@ exports.syncFromMeta = async (req, res) => {
             footer?.text || null,
             parameter_format || "POSITIONAL",
             req.user?.id || 1,
-          ]
+          ],
         );
 
         templateId = insertRes.insertId;
@@ -287,13 +288,13 @@ exports.syncFromMeta = async (req, res) => {
             updated_at = CURRENT_TIMESTAMP
           WHERE id = ?
           `,
-          [status, category, previous_category || null, templateId]
+          [status, category, previous_category || null, templateId],
         );
 
         // Remove old buttons before re-inserting
         await conn.execute(
           `DELETE FROM template_buttons WHERE template_id = ?`,
-          [templateId]
+          [templateId],
         );
       }
 
@@ -326,7 +327,7 @@ exports.syncFromMeta = async (req, res) => {
               btn.phone_number || null,
               btn.url || null,
               i,
-            ]
+            ],
           );
         }
       }
@@ -344,7 +345,7 @@ exports.syncFromMeta = async (req, res) => {
         )
         VALUES (?, ?, ?)
         `,
-        [templateId, status, JSON.stringify(tpl)]
+        [templateId, status, JSON.stringify(tpl)],
       );
     }
 
@@ -407,7 +408,7 @@ exports.getTemplateById = async (req, res) => {
   try {
     const [[template]] = await db.execute(
       `SELECT * FROM templates WHERE id = ?`,
-      [id]
+      [id],
     );
 
     if (!template) {
@@ -431,7 +432,7 @@ exports.getTemplateById = async (req, res) => {
       WHERE template_id = ?
       ORDER BY position ASC
       `,
-      [id]
+      [id],
     );
 
     return res.json({
@@ -448,3 +449,115 @@ exports.getTemplateById = async (req, res) => {
     });
   }
 };
+
+exports.syncno = async (req, res) => {
+  try {
+    const { metaPhoneNumberId } = req.body;
+    const userId = req.user.id;
+    const result = await syncAndLinkPhoneNumber(metaPhoneNumberId, userId);
+
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+async function syncAndLinkPhoneNumber(metaPhoneNumberId, userId) {
+  if (!metaPhoneNumberId) {
+    throw new Error("metaPhoneNumberId is required");
+  }
+  if (!userId) {
+    throw new Error("userId is required");
+  }
+
+  const GRAPH_VERSION = process.env.VERSION || "v22.0";
+  const ACCESS_TOKEN = process.env.META_ACCESS_TOKEN;
+  const WABA_ID = process.env.WABA_ID;
+
+  if (!ACCESS_TOKEN || !WABA_ID) {
+    throw new Error("Meta credentials missing");
+  }
+
+  // 1️⃣ Fetch from Meta
+  let metaResponse;
+  try {
+    metaResponse = await axios.get(
+      `https://graph.facebook.com/${GRAPH_VERSION}/${metaPhoneNumberId}`,
+      {
+        params: { fields: "display_phone_number,verified_name" },
+        headers: { Authorization: `Bearer ${ACCESS_TOKEN}` },
+      },
+    );
+  } catch (err) {
+    console.error("Meta API error:", err.response?.data || err.message);
+    throw new Error("Failed to fetch phone number from Meta");
+  }
+
+  const { display_phone_number, verified_name } = metaResponse.data;
+
+  if (!display_phone_number) {
+    throw new Error("display_phone_number missing from Meta response");
+  }
+
+  const conn = await db.getConnection();
+
+  try {
+    await conn.beginTransaction();
+
+    // 2️⃣ Insert / Update phone number
+    await conn.query(
+      `
+      INSERT INTO whatsapp_phone_numbers
+        (meta_phone_number_id, display_phone_number, verified_name, waba_id, is_test_number)
+      VALUES (?, ?, ?, ?, 1)
+      ON DUPLICATE KEY UPDATE
+        display_phone_number = VALUES(display_phone_number),
+        verified_name = VALUES(verified_name),
+        updated_at = CURRENT_TIMESTAMP
+      `,
+      [metaPhoneNumberId, display_phone_number, verified_name || null, WABA_ID],
+    );
+
+    // 3️⃣ Get INTERNAL whatsapp_phone_numbers.id
+    const [[phoneRow]] = await conn.query(
+      `
+      SELECT id
+      FROM whatsapp_phone_numbers
+      WHERE meta_phone_number_id = ?
+      `,
+      [metaPhoneNumberId],
+    );
+
+    if (!phoneRow) {
+      throw new Error("Failed to resolve internal phone ID");
+    }
+
+    const whatsappPhoneId = phoneRow.id;
+
+    // 4️⃣ Link to logged-in user
+    await conn.query(
+      `
+      INSERT IGNORE INTO user_whatsapp_numbers
+        (user_id, whatsapp_phone_id, role)
+      VALUES (?, ?, 'owner')
+      `,
+      [userId, whatsappPhoneId],
+    );
+
+    await conn.commit();
+
+    return {
+      meta_phone_number_id: metaPhoneNumberId,
+      display_phone_number,
+      verified_name,
+      linked_to_user: userId,
+      message: "Phone number synced and linked successfully",
+    };
+  } catch (err) {
+    await conn.rollback();
+    console.error("DB error:", err);
+    throw new Error("Failed to sync & link phone number");
+  } finally {
+    conn.release();
+  }
+}
