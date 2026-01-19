@@ -63,6 +63,8 @@ async function sendWhatsappTemplateMessage({
   messageFromMobNoId,
   templateId,
   mobile,
+  variables = {},
+  header = null,
 }) {
   const numericTemplateId = Number(templateId);
 
@@ -77,38 +79,46 @@ async function sendWhatsappTemplateMessage({
     throw new Error("Meta access token missing");
   }
 
-  // 1️⃣ Get template details
+  // 1️⃣ Fetch template
   const [[template]] = await db.query(
-    `
-    SELECT name, language
-    FROM templates
-    WHERE id = ?
-    `,
+    `SELECT name, language, components FROM templates WHERE id = ?`,
     [numericTemplateId],
   );
 
-  if (!template) {
-    throw new Error("Template not found");
+  if (!template) throw new Error("Template not found");
+
+  let templateComponents = template.components;
+
+  // If string → parse
+  if (typeof templateComponents === "string") {
+    templateComponents = JSON.parse(templateComponents);
   }
 
-  const { name, language } = template;
+  // If single object → wrap into array
+  if (!Array.isArray(templateComponents)) {
+    templateComponents = [templateComponents];
+  }
 
-  // 2️⃣ Payload
+  // 2️⃣ Build components dynamically
+  const components = buildTemplateComponents(templateComponents, {
+    variables,
+    header,
+  });
+
+  // 3️⃣ Final payload
   const payload = {
     messaging_product: "whatsapp",
     to: mobile,
     type: "template",
     template: {
-      name: name,
-      language: {
-        code: language || "en_US",
-      },
+      name: template.name,
+      language: { code: template.language || "en_US" },
+      components,
     },
   };
 
   const url = `https://graph.facebook.com/${GRAPH_VERSION}/${messageFromMobNoId}/messages`;
 
-  // 3️⃣ Send
   const response = await axios.post(url, payload, {
     headers: {
       Authorization: `Bearer ${ACCESS_TOKEN}`,
@@ -116,8 +126,87 @@ async function sendWhatsappTemplateMessage({
     },
   });
 
+  const messageId = response.data.messages?.[0]?.id;
+
+  // Save to DB
+  await db.query(
+    `INSERT INTO message_logs 
+   (message_id, mobile, template_id, status)
+   VALUES (?, ?, ?, ?)`,
+    [messageId, mobile, numericTemplateId, "sent"],
+  );
+
   return {
     success: true,
     message_id: response.data.messages?.[0]?.id,
   };
+}
+
+function buildTemplateComponents(templateComponents, input) {
+  if (!Array.isArray(templateComponents)) {
+    throw new Error("Template components must be an array");
+  }
+
+  const components = [];
+
+  for (const comp of templateComponents) {
+    if (!comp?.type) continue;
+
+    // BODY
+    if (comp.type === "body") {
+      components.push({
+        type: "body",
+        parameters: (input.variables?.body || []).map((v) => ({
+          type: "text",
+          text: String(v),
+        })),
+      });
+    }
+
+    // HEADER
+    if (comp.type === "header") {
+      if (comp.format === "text") {
+        components.push({
+          type: "header",
+          parameters: [
+            {
+              type: "text",
+              text: input.header?.text || "",
+            },
+          ],
+        });
+      }
+
+      if (["image", "video", "document"].includes(comp.format)) {
+        components.push({
+          type: "header",
+          parameters: [
+            {
+              type: comp.format,
+              [comp.format]: {
+                link: input.header?.link,
+              },
+            },
+          ],
+        });
+      }
+    }
+
+    // BUTTON
+    if (comp.type === "button") {
+      const btnVars = input.variables?.buttons?.[comp.index] || [];
+
+      components.push({
+        type: "button",
+        sub_type: comp.sub_type,
+        index: comp.index,
+        parameters: btnVars.map((v) => ({
+          type: "text",
+          text: String(v),
+        })),
+      });
+    }
+  }
+
+  return components;
 }
